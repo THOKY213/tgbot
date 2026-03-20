@@ -21,16 +21,17 @@ from telegram.constants import ParseMode
 
 # ─── НАСТРОЙКИ ────────────────────────────────────────────────────────────────
 
-BOT_TOKEN    = "8785317982:AAEZFtCiFN5jYJE4GHcQGuwZgtSVZoJngto"
+BOT_TOKEN    = "ВАШ_ТОКЕН_ЗДЕСЬ"
 DB           = "debts.db"
 LOG_FILE     = "bot.log"   # путь к файлу логов, или "" чтобы не писать в файл
-LOG_ADMIN_ID = 938917446        # ваш Telegram ID — сюда будут приходить уведомления об ошибках
+LOG_ADMIN_ID = None        # ваш Telegram ID — сюда будут приходить уведомления об ошибках
 
 # ─── СОСТОЯНИЯ ────────────────────────────────────────────────────────────────
 
 ADD_NAME, ADD_PHONE, ADD_AMOUNT, ADD_DESC, ADD_DATE = range(5)
-SEND_MSG  = 10
-WAIT_FILE = 20
+SEND_MSG   = 10
+WAIT_FILE  = 20
+PICK_CLIENT = 30
 
 # ─── ЛОГИРОВАНИЕ ──────────────────────────────────────────────────────────────
 
@@ -106,13 +107,16 @@ def init_db():
             )
         """)
         cols = [row[1] for row in c.execute("PRAGMA table_info(clients)")]
+        if "name" in cols and "telegram_id" not in cols:
+            c.execute("ALTER TABLE clients ADD COLUMN telegram_id INTEGER")
         if "name" not in cols or "amount" not in cols:
             c.execute("DROP TABLE clients")
             c.execute("""
                 CREATE TABLE clients (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL, phone TEXT,
-                    amount REAL NOT NULL, desc TEXT, due TEXT
+                    amount REAL NOT NULL, desc TEXT, due TEXT,
+                    telegram_id INTEGER
                 )
             """)
 
@@ -201,7 +205,7 @@ async def list_clients(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"   📞 {r['phone'] or '—'}  💰 {r['amount']:,.2f} руб.\n"
             f"   📋 {r['desc'] or '—'}  📅 {r['due'] or '—'}\n\n"
         )
-    text += "_/del <ID> — удалить клиента_"
+    text += "_/del <ID> — удалить  |  /settg <ID> <TG ID> — привязать Telegram_"
     await q.message.edit_text(text, reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
 
 # ─── ДОБАВЛЕНИЕ КЛИЕНТА ───────────────────────────────────────────────────────
@@ -304,6 +308,36 @@ async def del_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text += f"🆔`{r['id']}` {r['name']} — {r['amount']:,.0f} руб.\n"
     await q.message.edit_text(text, reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
 
+
+async def cmd_settg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Привязать Telegram ID к клиенту: /settg <ID клиента> <Telegram ID>"""
+    if len(ctx.args) != 2:
+        await update.message.reply_text(
+            "Использование: `/settg <ID клиента> <Telegram ID>`\n\n"
+            "Пример: `/settg 3 987654321`\n\n"
+            "Telegram ID клиента: пусть напишет @userinfobot",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    try:
+        client_id, tg_id = int(ctx.args[0]), int(ctx.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Оба аргумента должны быть числами.")
+        return
+    client = db1("SELECT * FROM clients WHERE id=?", (client_id,))
+    if not client:
+        await update.message.reply_text(f"❌ Клиент `{client_id}` не найден.", parse_mode=ParseMode.MARKDOWN)
+        return
+    dbx("UPDATE clients SET telegram_id=? WHERE id=?", (tg_id, client_id))
+    logger.info(f"[settg] client_id={client_id} tg_id={tg_id} by user={update.effective_user.id}")
+    await update.message.reply_text(
+        f"✅ Telegram привязан!\n\n"
+        f"👤 *{client['name']}* → TG ID: `{tg_id}`\n\n"
+        f"Теперь напоминания будут отправляться напрямую.",
+        reply_markup=back_kb(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
 async def cmd_del(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await update.message.reply_text("Использование: `/del <ID>`", parse_mode=ParseMode.MARKDOWN)
@@ -343,6 +377,7 @@ async def remind_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(kb),
         parse_mode=ParseMode.MARKDOWN
     )
+    return PICK_CLIENT
 
 async def remind_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -370,7 +405,7 @@ async def remind_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     template = update.message.text.strip()
     ids = ctx.user_data.get("remind_ids", [])
-    lines = []
+    sent_tg, manual = [], []
     for cid in ids:
         r = db1("SELECT * FROM clients WHERE id=?", (cid,))
         if not r:
@@ -379,12 +414,31 @@ async def remind_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                .replace("{name}", r["name"])
                .replace("{amount}", f"{r['amount']:,.2f} руб.")
                .replace("{due}", r["due"] or "—"))
-        lines.append(f"📨 *{r['name']}* ({r['phone'] or 'нет тел.'}):\n`{msg}`")
-    logger.info(f"[remind] sent={len(lines)} by user={update.effective_user.id}")
-    result = f"✅ *Готово! Напоминаний: {len(lines)}*\n{'─'*30}\n\n"
-    result += "\n\n".join(lines[:10])
-    if len(lines) > 10:
-        result += f"\n\n_...и ещё {len(lines) - 10}_"
+        if r["telegram_id"]:
+            try:
+                await ctx.bot.send_message(chat_id=r["telegram_id"], text=msg)
+                sent_tg.append(r["name"])
+            except Exception as e:
+                logger.warning(f"[remind] failed to send to {r['telegram_id']}: {e}")
+                manual.append((r, msg))
+        else:
+            manual.append((r, msg))
+
+    logger.info(f"[remind] sent_tg={len(sent_tg)} manual={len(manual)} by user={update.effective_user.id}")
+
+    result = ""
+    if sent_tg:
+        result += f"✅ *Отправлено в Telegram ({len(sent_tg)}):*\n"
+        result += "\n".join(f"  • {n}" for n in sent_tg) + "\n\n"
+    if manual:
+        result += f"📋 *Скопируйте вручную ({len(manual)}):*\n\n"
+        for r, msg in manual[:10]:
+            result += f"📨 *{r['name']}* ({r['phone'] or 'нет тел.'}):\n`{msg}`\n\n"
+        if len(manual) > 10:
+            result += f"_...и ещё {len(manual) - 10}_"
+    if not result:
+        result = "⚠️ Нет клиентов."
+
     ctx.user_data.clear()
     await update.message.reply_text(
         result,
@@ -627,8 +681,6 @@ async def button_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await list_clients(update, ctx)
     elif data == "del_menu":
         await del_menu(update, ctx)
-    elif data == "remind":
-        await remind_menu(update, ctx)
     elif data.startswith("back_"):
         ctx.user_data.clear()
         await show_main(q.message, edit=True)
@@ -660,9 +712,12 @@ def main():
         entry_points=[CallbackQueryHandler(remind_menu, pattern="^remind$")],
         per_message=False,
         states={
-            SEND_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, remind_send)],
+            PICK_CLIENT: [CallbackQueryHandler(remind_pick, pattern="^r_"),
+                          CallbackQueryHandler(back_handler, pattern="^back_")],
+            SEND_MSG:    [MessageHandler(filters.TEXT & ~filters.COMMAND, remind_send)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel),
+                   CallbackQueryHandler(back_handler, pattern="^back_")],
     )
 
     import_conv = ConversationHandler(
@@ -680,8 +735,8 @@ def main():
     app.add_handler(import_conv)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("del", cmd_del))
+    app.add_handler(CommandHandler("settg", cmd_settg))
     app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CallbackQueryHandler(remind_pick, pattern="^r_"))
     app.add_handler(CallbackQueryHandler(button_router))
 
     logger.info("✅ Бот запущен!")
