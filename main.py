@@ -20,7 +20,7 @@ from telegram.constants import ParseMode
 # ─── НАСТРОЙКИ ────────────────────────────────────────────────────────────────
 
 BOT_TOKEN = "8785317982:AAEZFtCiFN5jYJE4GHcQGuwZgtSVZoJngto"
-DB = "debts.db"
+DB = "/data/debts.db"
 
 # ─── СОСТОЯНИЯ ────────────────────────────────────────────────────────────────
 
