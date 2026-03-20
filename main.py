@@ -24,7 +24,7 @@ from telegram.constants import ParseMode
 BOT_TOKEN    = "8785317982:AAEZFtCiFN5jYJE4GHcQGuwZgtSVZoJngto"
 DB           = "debts.db"
 LOG_FILE     = "bot.log"   # путь к файлу логов, или "" чтобы не писать в файл
-LOG_ADMIN_ID = 8785317982        # ваш Telegram ID — сюда будут приходить уведомления об ошибках
+LOG_ADMIN_ID = 8785317982       # ваш Telegram ID — сюда будут приходить уведомления об ошибках
 
 # ─── СОСТОЯНИЯ ────────────────────────────────────────────────────────────────
 
@@ -275,20 +275,26 @@ async def add_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = update.message.text.strip()
     due = None if txt == "/skip" else txt
     d = ctx.user_data
+    # Копируем ДО очистки — d это ссылка, не копия
+    name   = d["name"]
+    phone  = d.get("phone")
+    amount = d["amount"]
+    desc   = d.get("desc")
     cid = dbx(
         "INSERT INTO clients (name, phone, amount, desc, due) VALUES (?,?,?,?,?)",
-        (d["name"], d.get("phone"), d["amount"], d.get("desc"), due)
+        (name, phone, amount, desc, due)
     )
-    logger.info(f"[add_client] id={cid} name={d['name']} amount={d['amount']} by user={update.effective_user.id}")
+    logger.info(f"[add_client] id={cid} name={name} amount={amount} by user={update.effective_user.id}")
     ctx.user_data.clear()
+    dash = "—"
     await update.message.reply_text(
         f"✅ *Клиент добавлен!*\n\n"
         f"🆔 ID: `{cid}`\n"
-        f"👤 {d['name']}\n"
-        f"📞 {d.get('phone') or '—'}\n"
-        f"💰 {d['amount']:,.2f} руб.\n"
-        f"📋 {d.get('desc') or '—'}\n"
-        f"📅 {due or '—'}",
+        f"👤 {name}\n"
+        f"📞 {phone or dash}\n"
+        f"💰 {amount:,.2f} руб.\n"
+        f"📋 {desc or dash}\n"
+        f"📅 {due or dash}",
         reply_markup=back_and_action_kb("➕ Добавить ещё", "add"),
         parse_mode=ParseMode.MARKDOWN
     )
